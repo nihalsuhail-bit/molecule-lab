@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import re
 import math
+import requests
+from urllib.parse import quote
 from collections import Counter
 
 st.set_page_config(page_title="Chemistry Explorer | Molecule Lab", page_icon="🧪", layout="wide")
@@ -34,6 +36,52 @@ MOLECULES={
  'Acetic acid':('C2H4O2','The acid responsible for vinegar’s characteristic acidity.','Food chemistry and chemical manufacture.'),
  'Calcium carbonate':('CaCO3','An ionic compound found in limestone, chalk, and shells.','Construction materials and antacids.'),
 }
+
+# Representative SMILES strings. For ionic compounds, disconnected ions and
+# formal charges are shown explicitly. Equivalent SMILES strings may also exist.
+SMILES = {
+    'Water': 'O',
+    'Carbon dioxide': 'O=C=O',
+    'Methane': 'C',
+    'Ammonia': 'N',
+    'Glucose': 'C([C@@H]1[C@H]([C@@H]([C@H](C(O1)O)O)O)O)O',
+    'Caffeine': 'Cn1c(=O)c2c(ncn2C)n(C)c1=O',
+    'Ethanol': 'CCO',
+    'Benzene': 'c1ccccc1',
+    'Oxygen': 'O=O',
+    'Hydrogen peroxide': 'OO',
+    'Sodium chloride': '[Na+].[Cl-]',
+    'Sulfuric acid': 'OS(=O)(=O)O',
+    'Acetic acid': 'CC(=O)O',
+    'Calcium carbonate': '[Ca+2].[O-]C(=O)[O-]',
+}
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_pubchem_compound(molecule_name):
+    """Fetch current compound properties from the official PubChem PUG REST API."""
+    encoded_name = quote(molecule_name, safe="")
+    url = (
+        "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/"
+        f"{encoded_name}/property/SMILES,ConnectivitySMILES,IUPACName,MolecularFormula,MolecularWeight/JSON"
+    )
+    try:
+        response = requests.get(
+            url, timeout=12, headers={"User-Agent": "ChemistryExplorer/1.0 (educational Streamlit app)"}
+        )
+        response.raise_for_status()
+        properties = response.json().get("PropertyTable", {}).get("Properties", [])
+        if not properties:
+            return {"ok": False, "error": "PubChem returned no matching compound."}
+        record = properties[0]
+        return {"ok": True, "cid": record.get("CID"), "smiles": record.get("SMILES"),
+                "connectivity_smiles": record.get("ConnectivitySMILES"),
+                "iupac_name": record.get("IUPACName"), "formula": record.get("MolecularFormula"),
+                "molecular_weight": record.get("MolecularWeight"),
+                "source_url": f"https://pubchem.ncbi.nlm.nih.gov/compound/{record.get('CID')}"}
+    except requests.RequestException as exc:
+        return {"ok": False, "error": f"PubChem could not be reached right now ({type(exc).__name__})."}
+    except (ValueError, KeyError, TypeError):
+        return {"ok": False, "error": "PubChem returned data in an unexpected format."}
 
 def parse_formula(formula):
     formula=formula.strip().replace(' ','')
@@ -113,13 +161,47 @@ if page=='Home':
 
 elif page=='Molecule Explorer':
     st.markdown('<div class="eyebrow">MOLECULAR REFERENCE</div>',unsafe_allow_html=True); st.title('Molecule Explorer')
-    st.write('Search the molecule library and explore each compound’s formula, composition, molar mass, and key facts. Technical structure codes are intentionally hidden.')
+    st.write('Search the molecule library and explore each compound’s formula, SMILES notation, composition, molar mass, and key facts. SMILES is a text-based way to represent molecular structures.')
     query=st.text_input('Search by molecule name or formula',placeholder='Try caffeine, H2O, or C6H12O6')
     found=[n for n,(f,_,__) in MOLECULES.items() if not query or query.lower() in n.lower() or query.lower() in f.lower()]
     if found:
         name=st.selectbox('Select a molecule',found); formula,desc,uses=MOLECULES[name]; mass,counts=calc_mass(formula)
         x,y,z=st.columns(3); x.metric('Chemical formula',formula); y.metric('Molar mass',f'{mass:.3f} g/mol'); z.metric('Total atoms',sum(counts.values()))
         st.markdown('### About this molecule'); st.write(desc); st.markdown('**Applications / context:** '+uses)
+        st.markdown('### SMILES notation')
+        st.write('Live lookup: PubChem PUG REST API')
+        refresh_pubchem = st.button('Refresh PubChem data', key='refresh_pubchem')
+        if refresh_pubchem:
+            fetch_pubchem_compound.clear()
+        with st.spinner('Looking up this molecule in PubChem…'):
+            pubchem = fetch_pubchem_compound(name)
+        if pubchem.get('ok'):
+            live_smiles = pubchem.get('smiles') or pubchem.get('connectivity_smiles')
+            if live_smiles:
+                st.success(f"Live data retrieved from PubChem · CID {pubchem.get('cid')}")
+                st.code(live_smiles, language=None)
+            else:
+                st.warning('PubChem matched the compound but did not return a SMILES field. Showing the built-in reference string below if available.')
+                live_smiles = None
+            if pubchem.get('iupac_name'):
+                st.caption('IUPAC name: ' + str(pubchem['iupac_name']))
+            if pubchem.get('formula'):
+                st.caption('PubChem formula: ' + str(pubchem['formula']))
+            if pubchem.get('molecular_weight'):
+                st.caption('PubChem molecular weight: ' + str(pubchem['molecular_weight']) + ' g/mol')
+            st.markdown(f"[Open this record on PubChem]({pubchem.get('source_url')})")
+        else:
+            live_smiles = None
+            st.warning(pubchem.get('error', 'PubChem lookup failed.'))
+        if not pubchem.get('ok') or not (pubchem.get('smiles') or pubchem.get('connectivity_smiles')):
+            fallback_smiles = SMILES.get(name)
+            if fallback_smiles:
+                st.markdown('**Built-in fallback SMILES**')
+                st.code(fallback_smiles, language=None)
+                st.caption('This is the local reference value in the app, not a live PubChem result.')
+            else:
+                st.info('No SMILES value is available from PubChem or the built-in reference for this molecule.')
+        st.caption('SMILES (Simplified Molecular Input Line Entry System) encodes a molecular structure as text. PubChem results are cached for up to 24 hours; use Refresh PubChem data to request a fresh lookup.')
         st.markdown('### Element composition')
         comp=[]
         for s,n in counts.items(): comp.append({'Element':E_BY_SYMBOL[s]['Element'],'Symbol':s,'Number of atoms':n,'Atomic mass (u)':MASS[s],'Mass contribution (g/mol)':round(MASS[s]*n,4)})
@@ -127,7 +209,7 @@ elif page=='Molecule Explorer':
         st.caption('Mass values are calculated from this app’s reference atomic masses. Molecular properties are educational summaries; check authoritative references for research use.')
     else: st.warning('No matching molecule in the starter library. Use Chemistry Solver to calculate a formula’s molar mass.')
     with st.expander('Browse the complete starter library'):
-        st.dataframe(pd.DataFrame([{'Molecule':n,'Formula':v[0],'Description':v[1]} for n,v in MOLECULES.items()]),hide_index=True,use_container_width=True)
+        st.dataframe(pd.DataFrame([{'Molecule':n,'Formula':v[0],'Built-in fallback SMILES':SMILES.get(n, 'Not available'),'Description':v[1]} for n,v in MOLECULES.items()]),hide_index=True,use_container_width=True)
 
 elif page=='Periodic Table':
     st.markdown('<div class="eyebrow">ELEMENT REFERENCE</div>',unsafe_allow_html=True); st.title('Periodic Table')
