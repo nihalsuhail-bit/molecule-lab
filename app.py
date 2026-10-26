@@ -1,304 +1,230 @@
-import json
-import time
-from io import StringIO
-
-import pandas as pd
-import requests
 import streamlit as st
-import streamlit.components.v1 as components
+import pandas as pd
+import re
+import math
+from collections import Counter
 
-APP_TITLE = "Molecule Lab"
-PUBCHEM = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
-HEADERS = {"User-Agent": "MoleculeLabStudentProject/1.0 (educational chemistry explorer)"}
+st.set_page_config(page_title="Chemistry Explorer | Molecule Lab", page_icon="🧪", layout="wide")
 
-st.set_page_config(
-    page_title="Molecule Lab | Explore Chemistry",
-    page_icon="⚛️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.markdown(""" <style> .stApp{background:radial-gradient(circle at 12% 0%,#12342b 0,#0b1415 38%,#080d0f 100%);color:#e8f5ef} [data-testid="stSidebar"]{background:#0b1717;border-right:1px solid #244b40} h1,h2,h3{color:#edfff5!important;letter-spacing:-.025em} p, label, .stMarkdown{color:#cfe1d9} div[data-testid="stMetric"]{background:#101f1d;border:1px solid #285346;border-radius:14px;padding:14px} div[data-testid="stMetricLabel"]{color:#a9c8bc!important} div[data-testid="stMetricValue"]{color:#6ee7b7!important} .stButton>button,.stDownloadButton>button{background:#10b981;color:#06120e;border:0;border-radius:10px;font-weight:700} .stButton>button:hover,.stDownloadButton>button:hover{background:#34d399;color:#06120e} div[data-baseweb="select"]>div,div[data-baseweb="input"]>div,textarea{background:#101b1d!important;border-color:#2a5146!important} hr{border-color:#24463e} div[data-testid="stExpander"]{border:1px solid #25483e;border-radius:12px} .lab-card{padding:18px;border:1px solid #285346;border-radius:16px;background:linear-gradient(135deg,rgba(16,40,35,.95),rgba(13,23,25,.95));min-height:115px} .eyebrow{color:#6ee7b7;font-size:.78rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase} </style> """, unsafe_allow_html=True)
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
-:root { --ink:#eaf2ff; --muted:#9db0c8; --line:rgba(160,190,220,.16); --panel:#101c2d; --cyan:#72f0e0; }
-html, body, [class*="css"] { font-family:'Manrope',sans-serif; }
-.stApp { background: radial-gradient(ellipse at 78% 0%, #18304a 0%, #0a1220 43%, #080e18 100%); color:var(--ink); }
-[data-testid="stHeader"] { background:rgba(8,14,24,.65); }
-[data-testid="stSidebar"] { background:linear-gradient(180deg,#0d1929,#0a111d); border-right:1px solid var(--line); }
-.block-container { padding-top:1.7rem; max-width:1440px; }
-.hero { padding:1.4rem 0 1.1rem 0; }
-.eyebrow { color:#72f0e0; text-transform:uppercase; letter-spacing:.19em; font-size:.72rem; font-weight:800; }
-.hero h1 { color:#f1f6ff; font-size:clamp(2.3rem,5vw,4.1rem); line-height:1.04; letter-spacing:-.055em; margin:.45rem 0 .7rem 0; font-weight:800; }
-.hero p { color:#a9bbd0; font-size:1rem; max-width:760px; line-height:1.7; }
-.panel { background:linear-gradient(145deg,rgba(20,35,54,.94),rgba(12,23,37,.94)); border:1px solid var(--line); border-radius:20px; padding:1.15rem 1.25rem; box-shadow:0 14px 42px rgba(0,0,0,.16); }
-.metric { background:rgba(17,31,48,.85); border:1px solid var(--line); border-radius:14px; padding:1rem; min-height:105px; }
-.metric-label { color:#9db0c8; font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; }
-.metric-value { color:#f1f6ff; font-size:1.35rem; font-weight:800; margin-top:.35rem; overflow-wrap:anywhere; }
-.section-title { color:#edf5ff; font-size:1.2rem; font-weight:800; letter-spacing:-.02em; margin:.4rem 0 .8rem 0; }
-.small-muted { color:#9db0c8; font-size:.84rem; line-height:1.6; }
-.tag { display:inline-block; border:1px solid rgba(114,240,224,.28); background:rgba(114,240,224,.07); color:#8ff8e9; border-radius:999px; padding:.25rem .6rem; font-size:.72rem; margin:0 .3rem .3rem 0; }
-code, .stCode { font-family:'DM Mono',monospace!important; }
-.stButton button, .stDownloadButton button { border-radius:12px; border:1px solid rgba(114,240,224,.35); font-weight:700; }
-.stButton button[kind="primary"] { background:linear-gradient(90deg,#55d8d0,#8bf2d7); color:#07131c; }
-div[data-testid="stAlert"] { border-radius:12px; }
-hr { border-color:var(--line); }
-</style>
-""", unsafe_allow_html=True)
+# Reference data: atomic masses in u; family labels are simplified educational categories.
+RAW = ''' H|Hydrogen|1.008|Nonmetal;He|Helium|4.0026|Noble gas;Li|Lithium|6.94|Alkali metal;Be|Beryllium|9.0122|Alkaline earth metal;B|Boron|10.81|Metalloid;C|Carbon|12.011|Nonmetal;N|Nitrogen|14.007|Nonmetal;O|Oxygen|15.999|Nonmetal;F|Fluorine|18.998|Halogen;Ne|Neon|20.180|Noble gas;Na|Sodium|22.990|Alkali metal;Mg|Magnesium|24.305|Alkaline earth metal;Al|Aluminium|26.982|Post-transition metal;Si|Silicon|28.085|Metalloid;P|Phosphorus|30.974|Nonmetal;S|Sulfur|32.06|Nonmetal;Cl|Chlorine|35.45|Halogen;Ar|Argon|39.948|Noble gas;K|Potassium|39.098|Alkali metal;Ca|Calcium|40.078|Alkaline earth metal;Sc|Scandium|44.956|Transition metal;Ti|Titanium|47.867|Transition metal;V|Vanadium|50.942|Transition metal;Cr|Chromium|51.996|Transition metal;Mn|Manganese|54.938|Transition metal;Fe|Iron|55.845|Transition metal;Co|Cobalt|58.933|Transition metal;Ni|Nickel|58.693|Transition metal;Cu|Copper|63.546|Transition metal;Zn|Zinc|65.38|Transition metal;Ga|Gallium|69.723|Post-transition metal;Ge|Germanium|72.630|Metalloid;As|Arsenic|74.922|Metalloid;Se|Selenium|78.971|Nonmetal;Br|Bromine|79.904|Halogen;Kr|Krypton|83.798|Noble gas;Rb|Rubidium|85.468|Alkali metal;Sr|Strontium|87.62|Alkaline earth metal;Y|Yttrium|88.906|Transition metal;Zr|Zirconium|91.224|Transition metal;Nb|Niobium|92.906|Transition metal;Mo|Molybdenum|95.95|Transition metal;Tc|Technetium|98|Transition metal;Ru|Ruthenium|101.07|Transition metal;Rh|Rhodium|102.91|Transition metal;Pd|Palladium|106.42|Transition metal;Ag|Silver|107.87|Transition metal;Cd|Cadmium|112.41|Transition metal;In|Indium|114.82|Post-transition metal;Sn|Tin|118.71|Post-transition metal;Sb|Antimony|121.76|Metalloid;Te|Tellurium|127.60|Metalloid;I|Iodine|126.90|Halogen;Xe|Xenon|131.29|Noble gas;Cs|Caesium|132.91|Alkali metal;Ba|Barium|137.33|Alkaline earth metal;La|Lanthanum|138.91|Lanthanide;Ce|Cerium|140.12|Lanthanide;Pr|Praseodymium|140.91|Lanthanide;Nd|Neodymium|144.24|Lanthanide;Pm|Promethium|145|Lanthanide;Sm|Samarium|150.36|Lanthanide;Eu|Europium|151.96|Lanthanide;Gd|Gadolinium|157.25|Lanthanide;Tb|Terbium|158.93|Lanthanide;Dy|Dysprosium|162.50|Lanthanide;Ho|Holmium|164.93|Lanthanide;Er|Erbium|167.26|Lanthanide;Tm|Thulium|168.93|Lanthanide;Yb|Ytterbium|173.05|Lanthanide;Lu|Lutetium|174.97|Lanthanide;Hf|Hafnium|178.49|Transition metal;Ta|Tantalum|180.95|Transition metal;W|Tungsten|183.84|Transition metal;Re|Rhenium|186.21|Transition metal;Os|Osmium|190.23|Transition metal;Ir|Iridium|192.22|Transition metal;Pt|Platinum|195.08|Transition metal;Au|Gold|196.97|Transition metal;Hg|Mercury|200.59|Transition metal;Tl|Thallium|204.38|Post-transition metal;Pb|Lead|207.2|Post-transition metal;Bi|Bismuth|208.98|Post-transition metal;Po|Polonium|209|Post-transition metal;At|Astatine|210|Halogen;Rn|Radon|222|Noble gas;Fr|Francium|223|Alkali metal;Ra|Radium|226|Alkaline earth metal;Ac|Actinium|227|Actinide;Th|Thorium|232.04|Actinide;Pa|Protactinium|231.04|Actinide;U|Uranium|238.03|Actinide;Np|Neptunium|237|Actinide;Pu|Plutonium|244|Actinide;Am|Americium|243|Actinide;Cm|Curium|247|Actinide;Bk|Berkelium|247|Actinide;Cf|Californium|251|Actinide;Es|Einsteinium|252|Actinide;Fm|Fermium|257|Actinide;Md|Mendelevium|258|Actinide;No|Nobelium|259|Actinide;Lr|Lawrencium|266|Actinide;Rf|Rutherfordium|267|Transition metal;Db|Dubnium|268|Transition metal;Sg|Seaborgium|269|Transition metal;Bh|Bohrium|270|Transition metal;Hs|Hassium|277|Transition metal;Mt|Meitnerium|278|Transition metal;Ds|Darmstadtium|281|Transition metal;Rg|Roentgenium|282|Transition metal;Cn|Copernicium|285|Transition metal;Nh|Nihonium|286|Post-transition metal;Fl|Flerovium|289|Post-transition metal;Mc|Moscovium|290|Post-transition metal;Lv|Livermorium|293|Post-transition metal;Ts|Tennessine|294|Halogen;Og|Oganesson|294|Noble gas '''
+elements=[]
+for z,entry in enumerate(RAW.strip().split(';'), start=1):
+    sym,name,mass,fam=entry.split('|')
+    elements.append({'Atomic number':z,'Symbol':sym,'Element':name,'Atomic mass (u)':float(mass),'Family':fam})
+EDF=pd.DataFrame(elements)
+MASS={x['Symbol']:x['Atomic mass (u)'] for x in elements}
+E_BY_SYMBOL={x['Symbol']:x for x in elements}
 
-# Common, recognizable compounds to make first use effortless.
-STARTER_MOLECULES = [
-    "Water", "Ethanol", "Caffeine", "Glucose", "Aspirin", "Acetaminophen",
-    "Citric acid", "Benzene", "Methane", "Acetic acid", "Urea", "Lactic acid",
-    "Ibuprofen", "Nicotine", "Vanillin", "Theobromine", "Glycine", "ATP",
-]
-
-PROPERTY_DESCRIPTIONS = {
-    "MolecularFormula": ("Molecular formula", "The types and numbers of atoms in one molecule, written using element symbols."),
-    "MolecularWeight": ("Molecular weight", "Average mass per mole of compound, reported in g/mol."),
-    "IUPACName": ("IUPAC name", "A systematic name designed to identify the compound unambiguously."),
-    "CanonicalSMILES": ("Canonical SMILES", "A text notation that encodes molecular connectivity. Different valid SMILES can represent the same structure."),
-    "IsomericSMILES": ("Isomeric SMILES", "SMILES notation that can encode stereochemistry and isotopic information."),
-    "XLogP": ("XLogP", "A computed estimate of the octanol/water partition coefficient; higher values generally indicate greater lipophilicity."),
-    "TPSA": ("Topological polar surface area", "A calculated estimate of the polar surface area; often useful when discussing permeability and molecular polarity."),
-    "HBondDonorCount": ("Hydrogen-bond donors", "Count of donor groups, such as suitable O–H or N–H groups, under the database's rules."),
-    "HBondAcceptorCount": ("Hydrogen-bond acceptors", "Count of atoms that can accept a hydrogen bond under the database's rules."),
-    "RotatableBondCount": ("Rotatable bonds", "An approximate count of single bonds whose rotation contributes to molecular flexibility."),
-    "ExactMass": ("Exact mass", "Mass calculated from the most abundant isotopes, in unified atomic mass units (u)."),
-    "Complexity": ("Structural complexity", "A database-computed descriptor; it is not a direct measure of toxicity or difficulty of synthesis."),
+MOLECULES={
+ 'Water':('H2O','Polar molecule essential to known life.','Solvent, heat transfer, and biological chemistry.'),
+ 'Carbon dioxide':('CO2','Linear molecule involved in respiration and photosynthesis.','Carbon cycle, carbonation, and industrial processes.'),
+ 'Methane':('CH4','The simplest alkane; carbon has a tetrahedral arrangement.','Fuel and chemical feedstock.'),
+ 'Ammonia':('NH3','Nitrogen-containing molecule with a trigonal-pyramidal shape.','Fertilizer production and industrial chemistry.'),
+ 'Glucose':('C6H12O6','A simple sugar used by cells as an energy source.','Cellular respiration and metabolism.'),
+ 'Caffeine':('C8H10N4O2','A naturally occurring stimulant found in coffee and tea.','Common in beverages; affects alertness.'),
+ 'Ethanol':('C2H6O','An alcohol containing a hydroxyl group.','Solvent and fuel additive.'),
+ 'Benzene':('C6H6','An aromatic six-carbon ring. Benzene is carcinogenic.','Industrial feedstock; hazardous chemical.'),
+ 'Oxygen':('O2','A diatomic form of the element oxygen.','Cellular respiration and combustion support.'),
+ 'Hydrogen peroxide':('H2O2','A peroxide with an oxygen–oxygen bond.','Bleaching and disinfecting uses at suitable concentrations.'),
+ 'Sodium chloride':('NaCl','An ionic compound made of sodium and chloride ions.','Food seasoning and chemical manufacture.'),
+ 'Sulfuric acid':('H2SO4','A strong diprotic acid and important industrial chemical.','Fertilizer manufacture; highly corrosive.'),
+ 'Acetic acid':('C2H4O2','The acid responsible for vinegar’s characteristic acidity.','Food chemistry and chemical manufacture.'),
+ 'Calcium carbonate':('CaCO3','An ionic compound found in limestone, chalk, and shells.','Construction materials and antacids.'),
 }
-PROP_FIELDS = ",".join(PROPERTY_DESCRIPTIONS.keys())
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def pubchem_lookup(name: str) -> dict:
-    """Resolve a name through PubChem and retrieve its standard property record."""
-    safe_name = requests.utils.quote(name.strip(), safe="")
-    url = f"{PUBCHEM}/compound/name/{safe_name}/property/{PROP_FIELDS}/JSON"
-    response = requests.get(url, headers=HEADERS, timeout=20)
-    if response.status_code == 404:
-        raise ValueError(f'PubChem could not find a compound named “{name}”. Try a common name or a PubChem CID.')
-    response.raise_for_status()
-    payload = response.json()
-    props = payload.get("PropertyTable", {}).get("Properties", [])
-    if not props:
-        raise ValueError("PubChem returned no property record for this search.")
-    record = props[0]
-    cid = record.get("CID")
-    record["CID"] = cid
-    record["RequestedName"] = name.strip()
-    record["PubChemURL"] = f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}"
-    return record
+def parse_formula(formula):
+    formula=formula.strip().replace(' ','')
+    if not formula: raise ValueError('Enter a chemical formula.')
+    tokens=re.findall(r'[A-Z][a-z]?|\d+|[()]',formula)
+    if ''.join(tokens)!=formula: raise ValueError('Use valid element symbols, subscripts as numbers, and parentheses only.')
+    i=0
+    def group():
+        nonlocal i
+        counts=Counter()
+        while i<len(tokens) and tokens[i]!=')':
+            if tokens[i]=='(':
+                i+=1; inside=group()
+                if i>=len(tokens) or tokens[i]!=')': raise ValueError('Check the parentheses in your formula.')
+                i+=1; mult=1
+                if i<len(tokens) and tokens[i].isdigit(): mult=int(tokens[i]); i+=1
+                for s,n in inside.items(): counts[s]+=n*mult
+            elif re.fullmatch(r'[A-Z][a-z]?',tokens[i]):
+                s=tokens[i]; i+=1
+                if s not in MASS: raise ValueError(f'Unknown element symbol: {s}')
+                n=1
+                if i<len(tokens) and tokens[i].isdigit(): n=int(tokens[i]); i+=1
+                if n<1: raise ValueError('Subscripts must be positive integers.')
+                counts[s]+=n
+            else: raise ValueError('Formula format is not valid.')
+        return counts
+    result=group()
+    if i<len(tokens) and tokens[i]==')': i+=1
+    if i!=len(tokens): raise ValueError('Formula format is not valid.')
+    return result
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def pubchem_sdf(cid: int) -> str:
-    """Request a 3D SDF conformer. PubChem may not have a 3D conformer for every CID."""
-    url = f"{PUBCHEM}/compound/cid/{int(cid)}/SDF"
-    response = requests.get(url, params={"record_type": "3d"}, headers=HEADERS, timeout=25)
-    if response.status_code != 200 or not response.text.strip() or "V2000" not in response.text and "V3000" not in response.text:
-        raise ValueError("A 3D conformer was not available from PubChem for this compound.")
-    return response.text
+def calc_mass(formula):
+    counts=parse_formula(formula)
+    return sum(MASS[s]*n for s,n in counts.items()),counts
 
-def pretty(value):
-    if value is None or value == "":
-        return "Not available"
-    if isinstance(value, float):
-        return f"{value:.3f}".rstrip("0").rstrip(".")
-    return str(value)
+def balance_equation(equation):
+    try: import sympy as sp
+    except ImportError: raise ValueError('The equation balancer dependency is missing. Check requirements.txt.')
+    eq=equation.replace('→','->').replace('=','->')
+    if '->' not in eq: raise ValueError('Use an arrow, e.g. H2 + O2 -> H2O')
+    left,right=eq.split('->',1)
+    react=[x.strip() for x in left.split('+') if x.strip()]
+    prod=[x.strip() for x in right.split('+') if x.strip()]
+    if not react or not prod: raise ValueError('Enter reactants and products.')
+    fs=react+prod; parsed=[parse_formula(x) for x in fs]
+    atoms=sorted(set().union(*(p.keys() for p in parsed)))
+    mat=[[p.get(a,0)*(1 if j<len(react) else -1) for j,p in enumerate(parsed)] for a in atoms]
+    ns=sp.Matrix(mat).nullspace()
+    if not ns: raise ValueError('No balancing solution found. Check the formulas.')
+    vec=ns[0]; lcm=sp.ilcm(*[v.q for v in vec]); coeff=[int(v*lcm) for v in vec]
+    if all(c<0 for c in coeff): coeff=[-c for c in coeff]
+    if any(c<=0 for c in coeff): raise ValueError('Could not find positive coefficients for this equation.')
+    g=math.gcd(*coeff); coeff=[c//g for c in coeff]
+    fmt=lambda f,c: ('' if c==1 else str(c))+f
+    return ' + '.join(fmt(f,c) for f,c in zip(react,coeff[:len(react)]))+' → '+' + '.join(fmt(f,c) for f,c in zip(prod,coeff[len(react):]))
 
-def render_viewer(sdf: str, cid: int, style: str = "stick"):
-    # JSON encoding safely escapes the SDF before placing it inside JavaScript.
-    sdf_js = json.dumps(sdf)
-    html = f"""
-    <html><head>
-      <script src="https://3dmol.org/build/3Dmol-min.js"></script>
-      <style>
-        html,body{{margin:0;background:#0b1523;color:#c9d8e9;font-family:Arial,sans-serif;overflow:hidden}}
-        #viewer{{width:100%;height:430px;position:relative;border-radius:16px;overflow:hidden}}
-        .hint{{position:absolute;bottom:10px;left:14px;z-index:5;font-size:11px;letter-spacing:.04em;color:#a8bed3;background:rgba(8,15,25,.65);padding:6px 9px;border-radius:8px;pointer-events:none}}
-      </style>
-    </head><body>
-      <div id="viewer"><div class="hint">DRAG TO ROTATE · SCROLL TO ZOOM</div></div>
-      <script>
-      const sdf = {sdf_js};
-      const element = document.getElementById('viewer');
-      const viewer = $3Dmol.createViewer(element, {{backgroundColor:'#0b1523', antialias:true}});
-      viewer.addModel(sdf, 'sdf');
-      viewer.setStyle({{}}, {{"stick":{{radius:0.16,colorscheme:"Jmol"}}, "sphere":{{scale:0.24,colorscheme:"Jmol"}}}});
-      viewer.zoomTo();
-      viewer.render();
-      window.addEventListener('resize', () => viewer.resize());
-      </script>
-    </body></html>
-    """
-    components.html(html, height=445, scrolling=False)
+st.sidebar.markdown('<div class="eyebrow">EMERALD LAB</div>',unsafe_allow_html=True)
+st.sidebar.title('Chemistry Explorer')
+page=st.sidebar.radio('Navigate',['Home','Molecule Explorer','Periodic Table','Chemistry Solver','Quiz Arena','AI Tutor'])
+st.sidebar.markdown('---')
+st.sidebar.caption('Explore • Calculate • Learn')
 
-def property_table(record):
-    rows = []
-    for key, (label, description) in PROPERTY_DESCRIPTIONS.items():
-        rows.append({"Property": label, "Value": pretty(record.get(key)), "What it means": description})
-    return pd.DataFrame(rows)
+if page=='Home':
+    st.markdown('<div class="eyebrow">YOUR DIGITAL CHEMISTRY WORKBENCH</div>',unsafe_allow_html=True)
+    st.title('🧪 Chemistry Explorer')
+    st.subheader('Explore Molecules. Understand Chemistry.')
+    st.write('Discover the fascinating world of molecules, chemical structures, and the elements that make up our universe. Explore molecular formulas, learn essential chemical concepts, and build confidence through interactive tools.')
+    a,b,c=st.columns(3); a.metric('Elements','118'); b.metric('Molecule profiles',len(MOLECULES)); c.metric('Learning tools','4')
+    st.markdown('### Start exploring')
+    c1,c2=st.columns(2)
+    with c1: st.markdown('<div class="lab-card"><h3>🧬 Molecule Explorer</h3><p>Discover formulas, atom counts, molar masses, and useful facts.</p></div>',unsafe_allow_html=True)
+    with c2: st.markdown('<div class="lab-card"><h3>⚛️ Periodic Table</h3><p>Search all 118 elements and explore their basic properties.</p></div>',unsafe_allow_html=True)
+    c3,c4=st.columns(2)
+    with c3: st.markdown('<div class="lab-card"><h3>🧮 Chemistry Solver</h3><p>Calculate molar mass, convert moles and grams, and balance equations.</p></div>',unsafe_allow_html=True)
+    with c4: st.markdown('<div class="lab-card"><h3>🎯 Quiz Arena</h3><p>Practise key concepts with instant feedback and explanations.</p></div>',unsafe_allow_html=True)
+    st.info('Choose a tool from the sidebar to begin.')
 
-with st.sidebar:
-    st.markdown("## ⚛️ Molecule Lab")
-    st.markdown('<span class="tag">CHEMISTRY EXPLORER</span>', unsafe_allow_html=True)
-    st.markdown("---")
-    st.markdown("### Navigate")
-    page = st.radio("Workspace", ["Explore molecules", "Compare molecules", "About this project"], label_visibility="collapsed")
-    st.markdown("---")
-    st.markdown("**Data source**")
-    st.markdown("[PubChem · NIH](https://pubchem.ncbi.nlm.nih.gov/)")
-    st.markdown("[3Dmol.js viewer](https://3dmol.org/doc/)")
-    st.caption("Educational tool. Property availability depends on each PubChem record.")
+elif page=='Molecule Explorer':
+    st.markdown('<div class="eyebrow">MOLECULAR REFERENCE</div>',unsafe_allow_html=True); st.title('Molecule Explorer')
+    st.write('Search the molecule library and explore each compound’s formula, composition, molar mass, and key facts. Technical structure codes are intentionally hidden.')
+    query=st.text_input('Search by molecule name or formula',placeholder='Try caffeine, H2O, or C6H12O6')
+    found=[n for n,(f,_,__) in MOLECULES.items() if not query or query.lower() in n.lower() or query.lower() in f.lower()]
+    if found:
+        name=st.selectbox('Select a molecule',found); formula,desc,uses=MOLECULES[name]; mass,counts=calc_mass(formula)
+        x,y,z=st.columns(3); x.metric('Chemical formula',formula); y.metric('Molar mass',f'{mass:.3f} g/mol'); z.metric('Total atoms',sum(counts.values()))
+        st.markdown('### About this molecule'); st.write(desc); st.markdown('**Applications / context:** '+uses)
+        st.markdown('### Element composition')
+        comp=[]
+        for s,n in counts.items(): comp.append({'Element':E_BY_SYMBOL[s]['Element'],'Symbol':s,'Number of atoms':n,'Atomic mass (u)':MASS[s],'Mass contribution (g/mol)':round(MASS[s]*n,4)})
+        st.dataframe(pd.DataFrame(comp),hide_index=True,use_container_width=True)
+        st.caption('Mass values are calculated from this app’s reference atomic masses. Molecular properties are educational summaries; check authoritative references for research use.')
+    else: st.warning('No matching molecule in the starter library. Use Chemistry Solver to calculate a formula’s molar mass.')
+    with st.expander('Browse the complete starter library'):
+        st.dataframe(pd.DataFrame([{'Molecule':n,'Formula':v[0],'Description':v[1]} for n,v in MOLECULES.items()]),hide_index=True,use_container_width=True)
 
-if page == "Explore molecules":
-    st.markdown("""
-    <div class="hero">
-      <div class="eyebrow">THE MOLECULAR ATLAS · 01</div>
-      <h1>Explore the building<br>blocks of everything.</h1>
-      <p>Discover molecular identity, interpret chemical descriptors, and inspect three-dimensional structures in an interactive workspace powered by PubChem.</p>
-    </div>
-    """, unsafe_allow_html=True)
+elif page=='Periodic Table':
+    st.markdown('<div class="eyebrow">ELEMENT REFERENCE</div>',unsafe_allow_html=True); st.title('Periodic Table')
+    st.write('Search the reference list of all 118 elements. Family labels are simplified for learning.')
+    a,b=st.columns([2,1])
+    q=a.text_input('Search name, symbol, or atomic number',placeholder='e.g. Carbon, C, or 6')
+    fam=b.selectbox('Filter by family',['All families']+sorted(EDF['Family'].unique()))
+    df=EDF.copy()
+    if q: df=df[df['Element'].str.contains(q,case=False,na=False)|df['Symbol'].str.contains(q,case=False,na=False)|df['Atomic number'].astype(str).eq(q.strip())]
+    if fam!='All families': df=df[df['Family']==fam]
+    st.dataframe(df,hide_index=True,use_container_width=True,height=380)
+    selected=st.selectbox('Element details',[f"{r['Atomic number']} · {r['Symbol']} — {r['Element']}" for _,r in EDF.iterrows()])
+    num=int(selected.split(' · ')[0]); row=EDF.iloc[num-1]
+    x,y,z=st.columns(3); x.metric('Atomic number',int(row['Atomic number'])); y.metric('Symbol',row['Symbol']); z.metric('Atomic mass',f"{row['Atomic mass (u)']:.4g} u")
+    st.write(f"**Element:** {row['Element']} \n**Family:** {row['Family']}")
+    st.caption('Atomic masses for some radioactive elements are representative mass numbers. This is a compact educational reference, not a full laboratory database.')
 
-    col_search, col_btn = st.columns([4, 1])
-    with col_search:
-        search_name = st.text_input("Search by molecule name", value="Caffeine", placeholder="Try caffeine, ethanol, glucose…", label_visibility="collapsed")
-    with col_btn:
-        lookup_clicked = st.button("Explore molecule ↗", type="primary", use_container_width=True)
-
-    st.markdown('<div class="small-muted">QUICK DISCOVERY · Choose a compound to begin</div>', unsafe_allow_html=True)
-    chosen = st.pills("Popular compounds", STARTER_MOLECULES, selection_mode="single", label_visibility="collapsed") if hasattr(st, "pills") else st.selectbox("Popular compounds", ["Choose one…"] + STARTER_MOLECULES, label_visibility="collapsed")
-    if chosen and chosen != "Choose one…" and not lookup_clicked:
-        search_name = chosen
-
-    if "active_molecule" not in st.session_state:
-        st.session_state.active_molecule = "Caffeine"
-    if lookup_clicked and search_name.strip():
-        st.session_state.active_molecule = search_name.strip()
-    elif chosen and chosen != "Choose one…":
-        st.session_state.active_molecule = chosen
-
-    active_name = st.session_state.active_molecule
-    try:
-        with st.spinner(f"Retrieving verified compound data for {active_name}…"):
-            record = pubchem_lookup(active_name)
-        title_name = record.get("IUPACName") or active_name
-        st.markdown("---")
-        left, right = st.columns([1.05, 1.15], gap="large")
-        with left:
-            st.markdown('<div class="section-title">Molecular identity</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="panel"><div class="eyebrow">PUBCHEM CID {record.get("CID")}</div><h2 style="margin:.5rem 0;color:#f1f6ff;font-size:1.7rem">{active_name.title()}</h2><div class="small-muted">{title_name}</div><br><span class="tag">{pretty(record.get("MolecularFormula"))}</span><span class="tag">PubChem verified record</span><br><br><div class="small-muted">Canonical SMILES</div><div style="font-family:monospace;color:#8ff8e9;overflow-wrap:anywhere;margin:.35rem 0 1rem">{pretty(record.get("CanonicalSMILES"))}</div><div class="small-muted">Isomeric SMILES</div><div style="font-family:monospace;color:#d8c5ff;overflow-wrap:anywhere;margin:.35rem 0">{pretty(record.get("IsomericSMILES"))}</div></div>', unsafe_allow_html=True)
-            st.markdown("")
-            m1, m2 = st.columns(2)
-            with m1:
-                st.markdown(f'<div class="metric"><div class="metric-label">Molecular weight</div><div class="metric-value">{pretty(record.get("MolecularWeight"))}<span style="font-size:.7rem;color:#9db0c8"> g/mol</span></div></div>', unsafe_allow_html=True)
-            with m2:
-                st.markdown(f'<div class="metric"><div class="metric-label">XLogP</div><div class="metric-value">{pretty(record.get("XLogP"))}</div></div>', unsafe_allow_html=True)
-            st.markdown("")
-            st.link_button("Open full PubChem record ↗", record["PubChemURL"], use_container_width=True)
-        with right:
-            st.markdown('<div class="section-title">3D molecular observatory</div>', unsafe_allow_html=True)
+elif page=='Chemistry Solver':
+    st.markdown('<div class="eyebrow">CALCULATION DESK</div>',unsafe_allow_html=True); st.title('Chemistry Solver')
+    st.write('Get transparent calculations with units and steps.')
+    t1,t2,t3=st.tabs(['Molar mass','Moles ↔ grams','Balance equation'])
+    with t1:
+        f=st.text_input('Chemical formula',value='Ca(OH)2',key='formula_mass')
+        if st.button('Calculate molar mass'):
             try:
-                sdf = pubchem_sdf(int(record["CID"]))
-                render_viewer(sdf, int(record["CID"]))
-                st.markdown('<div class="small-muted">Ball-and-stick model · Drag to rotate · Scroll or pinch to zoom. Coordinates are retrieved from PubChem when a 3D conformer is available.</div>', unsafe_allow_html=True)
-                st.download_button("↓ Download 3D structure (.sdf)", sdf, file_name=f"pubchem_{record['CID']}.sdf", mime="chemical/x-mdl-sdfile", use_container_width=True)
-            except Exception as e:
-                st.warning(f"3D structure unavailable: {e}")
-                st.markdown("You can still explore the compound's text properties and open its PubChem record.")
-        st.markdown("---")
-        st.markdown('<div class="section-title">Chemical property dossier</div>', unsafe_allow_html=True)
-        df = property_table(record)
-        st.dataframe(df, use_container_width=True, hide_index=True, column_config={
-            "Property": st.column_config.TextColumn(width="medium"),
-            "Value": st.column_config.TextColumn(width="medium"),
-            "What it means": st.column_config.TextColumn(width="large"),
-        })
-        export = {k: record.get(k) for k in ["CID", "RequestedName", *PROPERTY_DESCRIPTIONS.keys(), "PubChemURL"]}
-        d1, d2 = st.columns(2)
-        with d1:
-            st.download_button("↓ Export property dossier · CSV", pd.DataFrame([export]).to_csv(index=False), file_name=f"{active_name.lower().replace(' ','_')}_properties.csv", mime="text/csv", use_container_width=True)
-        with d2:
-            st.download_button("↓ Export raw record · JSON", json.dumps(export, indent=2), file_name=f"{active_name.lower().replace(' ','_')}_properties.json", mime="application/json", use_container_width=True)
-        st.caption("Data retrieved from PubChem PUG REST. Computed descriptors and conformer availability can vary by compound.")
-    except requests.RequestException as e:
-        st.error("Could not connect to PubChem right now. Check your internet connection and try again.")
-        st.caption(f"Technical detail: {e}")
-    except (ValueError, KeyError, IndexError) as e:
-        st.error(str(e))
-    except Exception as e:
-        st.error("Something went wrong while loading this compound.")
-        st.caption(str(e))
+                m,counts=calc_mass(f); st.success(f'Molar mass of {f}: **{m:.4f} g/mol**')
+                rows=[{'Element':s,'Atom count':n,'Atomic mass (g/mol)':MASS[s],'Contribution (g/mol)':round(MASS[s]*n,4)} for s,n in counts.items()]
+                st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
+                st.write('Sum of the element contributions = **'+f'{m:.4f} g/mol**')
+            except Exception as e: st.error(str(e))
+    with t2:
+        f2=st.text_input('Chemical formula',value='H2O',key='formula_convert')
+        mode=st.radio('Known quantity',['Mass in grams','Amount in moles'],horizontal=True)
+        amount=st.number_input('Value',min_value=0.0,value=18.0 if mode=='Mass in grams' else 1.0,step=0.1)
+        if st.button('Convert quantity'):
+            try:
+                m,_=calc_mass(f2); st.metric('Molar mass',f'{m:.4f} g/mol')
+                if mode=='Mass in grams': st.success(f'n = m ÷ M = {amount:g} g ÷ {m:.4f} g/mol = **{amount/m:.6g} mol**')
+                else: st.success(f'm = n × M = {amount:g} mol × {m:.4f} g/mol = **{amount*m:.6g} g**')
+            except Exception as e: st.error(str(e))
+    with t3:
+        eq=st.text_input('Unbalanced equation',value='H2 + O2 -> H2O')
+        if st.button('Balance equation'):
+            try: st.success(balance_equation(eq)); st.caption('Coefficients are reduced to the smallest whole-number ratio. This basic tool is not a complete ionic or redox balancer.')
+            except Exception as e: st.error(str(e))
 
-elif page == "Compare molecules":
-    st.markdown("""
-    <div class="hero">
-      <div class="eyebrow">COMPARATIVE CHEMISTRY · 02</div>
-      <h1>Two molecules.<br>One clear comparison.</h1>
-      <p>Compare common descriptors side by side and see how molecular composition and polarity differ.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
-    with c1:
-        name1 = st.text_input("Molecule A", "Caffeine")
-    with c2:
-        name2 = st.text_input("Molecule B", "Theobromine")
-    if st.button("Compare compounds ↗", type="primary", use_container_width=True):
-        try:
-            with st.spinner("Fetching both compound records from PubChem…"):
-                a = pubchem_lookup(name1)
-                b = pubchem_lookup(name2)
-            st.markdown("---")
-            a_col, b_col = st.columns(2)
-            with a_col:
-                st.markdown(f'<div class="panel"><div class="eyebrow">COMPOUND A · CID {a.get("CID")}</div><h2 style="color:#f1f6ff">{name1.title()}</h2><div style="font-size:1.3rem;color:#72f0e0;font-weight:800">{pretty(a.get("MolecularFormula"))}</div><div class="small-muted">{pretty(a.get("IUPACName"))}</div></div>', unsafe_allow_html=True)
-            with b_col:
-                st.markdown(f'<div class="panel"><div class="eyebrow">COMPOUND B · CID {b.get("CID")}</div><h2 style="color:#f1f6ff">{name2.title()}</h2><div style="font-size:1.3rem;color:#c5a4ff;font-weight:800">{pretty(b.get("MolecularFormula"))}</div><div class="small-muted">{pretty(b.get("IUPACName"))}</div></div>', unsafe_allow_html=True)
-            compare_keys = ["MolecularWeight", "XLogP", "TPSA", "HBondDonorCount", "HBondAcceptorCount", "RotatableBondCount", "ExactMass", "Complexity"]
-            labels = [PROPERTY_DESCRIPTIONS[k][0] for k in compare_keys]
-            comparison = pd.DataFrame({
-                "Property": labels,
-                name1.title(): [a.get(k) for k in compare_keys],
-                name2.title(): [b.get(k) for k in compare_keys],
-            })
-            st.markdown('<div class="section-title">Descriptor comparison</div>', unsafe_allow_html=True)
-            st.dataframe(comparison, use_container_width=True, hide_index=True)
-            st.markdown('<div class="section-title">How to interpret this</div>', unsafe_allow_html=True)
-            st.markdown("""
-            - **Molecular weight** compares average mass per mole; it does not by itself predict biological activity.
-            - **XLogP** is a computed estimate related to lipophilicity; it should be interpreted alongside other descriptors.
-            - **TPSA** estimates polar surface area and can help frame discussions about polarity and permeability.
-            - **Hydrogen-bond donors/acceptors** describe interaction potential, not a direct measurement of binding strength.
-            """)
-            st.download_button("↓ Download comparison · CSV", comparison.to_csv(index=False), file_name="molecule_comparison.csv", mime="text/csv", use_container_width=True)
-        except Exception as e:
-            st.error(f"Could not complete comparison: {e}")
-    else:
-        st.info("Enter two compound names, then select **Compare compounds**. Examples: caffeine and theobromine, ethanol and methanol, or glucose and fructose.")
+elif page=='Quiz Arena':
+    st.markdown('<div class="eyebrow">KNOWLEDGE CHECK</div>',unsafe_allow_html=True); st.title('Quiz Arena')
+    bank={
+    'Fundamentals':[
+      ('What is the SI unit for amount of substance?',['Gram','Mole','Litre','Kelvin'],1,'The mole (mol) is the SI unit for amount of substance.'),
+      ('Which particle has a negative charge?',['Proton','Neutron','Electron','Nucleus'],2,'Electrons are negative, protons positive, and neutrons neutral.'),
+      ('What does atomic number count?',['Neutrons','Protons','Protons + neutrons','Electron shells'],1,'Atomic number is the number of protons in the nucleus.')],
+    'Molecules & formulas':[
+      ('What is the formula of water?',['H2O','HO2','H2O2','OH'],0,'Water contains two hydrogen atoms and one oxygen atom.'),
+      ('How many oxygen atoms are in CO2?',['1','2','3','4'],1,'The subscript 2 means there are two oxygen atoms.'),
+      ('What is the approximate molar mass of CO2?',['18 g/mol','28 g/mol','44 g/mol','64 g/mol'],2,'12.01 + 2 × 16.00 ≈ 44.01 g/mol.')],
+    'Periodic table':[
+      ('Which element has symbol Na?',['Nitrogen','Neon','Sodium','Nickel'],2,'Na is sodium, from the Latin name natrium.'),
+      ('Which family contains neon?',['Halogens','Noble gases','Alkali metals','Transition metals'],1,'Neon is a Group 18 noble gas.'),
+      ('Which element has atomic number 6?',['Oxygen','Carbon','Nitrogen','Boron'],1,'Carbon has six protons.')],
+    }
+    topic=st.selectbox('Choose a topic',list(bank))
+    with st.form('quiz'):
+        answers=[]
+        for i,(question,options,correct,explain) in enumerate(bank[topic]):
+            st.markdown(f'**{i+1}. {question}**')
+            answers.append(st.radio('Choose an answer',options,index=None,key=f'{topic}-{i}',label_visibility='collapsed'))
+        submitted=st.form_submit_button('Check my answers')
+    if submitted:
+        score=0
+        for i,((question,options,correct,explain),ans) in enumerate(zip(bank[topic],answers)):
+            if ans==options[correct]: score+=1; st.success(f'{i+1}. Correct! {explain}')
+            else: st.error(f'{i+1}. Correct answer: **{options[correct]}**. {explain}')
+        st.metric('Your score',f'{score}/{len(bank[topic])}',f'{round(100*score/len(bank[topic]))}%')
+        st.progress(score/len(bank[topic]))
+        if score==len(bank[topic]): st.balloons()
+        st.caption('Scores are for this session and are not permanently saved.')
 
-else:
-    st.markdown("""
-    <div class="hero">
-      <div class="eyebrow">PROJECT NOTES · 03</div>
-      <h1>Science you can<br>inspect and understand.</h1>
-      <p>Molecule Lab is an educational molecular exploration interface built around public chemical data.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    st.markdown("""
-    <div class="panel">
-      <div class="section-title">Technology stack</div>
-      <p><b>Streamlit</b> provides the interactive Python web application.</p>
-      <p><b>PubChem PUG REST</b> supplies compound identifiers and property records from the National Library of Medicine / NIH.</p>
-      <p><b>3Dmol.js</b> renders the returned SDF coordinates in an interactive WebGL molecular viewer.</p>
-      <p><b>Pandas</b> prepares tabular data and CSV exports.</p>
-      <hr>
-      <div class="section-title">Scientific notes</div>
-      <p>SMILES is a line notation, not a 3D structure. The 3D viewer uses coordinates from an available PubChem conformer. A computed conformer is one plausible geometry and should not be assumed to represent every physical environment or experimental state.</p>
-      <p>Descriptors such as XLogP and TPSA are model-derived properties. They are useful for learning and comparison, but they do not independently establish safety, toxicity, efficacy, or biological behaviour.</p>
-      <p>Property availability varies by compound. Missing values are shown as unavailable rather than invented.</p>
-      <hr>
-      <div class="small-muted">Sources: PubChem PUG REST documentation · 3Dmol.js documentation. Created as an educational project.</div>
-    </div>
-    """, unsafe_allow_html=True)
+elif page=='AI Tutor':
+    st.markdown('<div class="eyebrow">GUIDED LEARNING</div>',unsafe_allow_html=True); st.title('AI Chemistry Tutor')
+    st.write('Ask for a step-by-step explanation or practice questions. Real AI answers require an API key stored securely in Streamlit secrets.')
+    try: key=st.secrets.get('OPENAI_API_KEY')
+    except Exception: key=None
+    question=st.text_area('What would you like help with?',placeholder='Explain molarity step by step…')
+    level=st.selectbox('Explanation level',['Beginner','High-school chemistry','First-year university'])
+    if st.button('Ask the tutor'):
+        if not question.strip(): st.warning('Enter a question first.')
+        elif not key: st.info('AI is not connected yet. The other tools work without an API key. To enable it, add OPENAI_API_KEY under Streamlit app Secrets. Never put a secret key in GitHub.')
+        else:
+            try:
+                from openai import OpenAI
+                with st.spinner('Preparing an explanation…'):
+                    client=OpenAI(api_key=key)
+                    response=client.chat.completions.create(model='gpt-4o-mini',messages=[{'role':'system','content':f'You are a careful chemistry tutor. Explain at {level} level, show steps and units, state assumptions, and flag safety issues.'},{'role':'user','content':question}],temperature=0.3)
+                st.markdown('### Tutor response'); st.write(response.choices[0].message.content)
+            except Exception: st.error('The AI request failed. Check the secret, API access, and app logs.')
 
-st.markdown("---")
-st.markdown('<div style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;color:#7f94ac;font-size:.76rem"><span>MOLECULE LAB · EDUCATIONAL CHEMISTRY EXPLORER</span><span>Data: PubChem · Visualization: 3Dmol.js</span></div>', unsafe_allow_html=True)
+st.markdown('---')
+st.markdown("<div style='text-align:center;padding:18px 8px 8px'><h4 style='color:#34D399;margin-bottom:6px'>🧪 Chemistry Explorer</h4><p style='margin:3px 0'>Created by <strong>Nihal S</strong></p><p style='margin:3px 0'>AIML · SRM Institute of Science and Technology (SRM IST)</p><p style='color:#91aaa1;font-size:12px;margin-top:10px'>Exploring chemistry through technology.</p></div>",unsafe_allow_html=True)
