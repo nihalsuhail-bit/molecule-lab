@@ -119,10 +119,23 @@ def generate_local_3d_sdf(smiles):
         elif AllChem.UFFHasAllMoleculeParams(mol):
             AllChem.UFFOptimizeMolecule(mol, maxIters=500)
 
-        mol_block = Chem.MolToMolBlock(mol, confId=0)
-        if not mol_block or "M END" not in mol_block:
-            return {"ok": False, "error": "RDKit generated coordinates, but the structure file was incomplete."}
-        return {"ok": True, "sdf": mol_block + "\n$$$$\n", "dimension": "3D", "source": "RDKit local conformer generation"}
+        # Serialize as V3000 for more robust parsing by browser-based molecular viewers.
+        # Confirm that a conformer exists and that the mol block has a proper terminator.
+        if mol.GetNumConformers() == 0:
+            return {"ok": False, "error": "RDKit did not retain the generated 3D coordinates. Try another molecule."}
+        mol_block = Chem.MolToMolBlock(mol, confId=0, forceV3000=True)
+        if not mol_block or "V3000" not in mol_block:
+            # Fallback to RDKit's default mol-block writer.
+            mol_block = Chem.MolToMolBlock(mol, confId=0)
+        if not mol_block or not mol_block.strip():
+            return {"ok": False, "error": "RDKit could not export the generated molecular structure. Try another molecule."}
+        if "M END" not in mol_block:
+            mol_block = mol_block.rstrip() + "\nM END\n"
+        # Basic integrity check before sending the SDF text to 3Dmol.js.
+        if "M END" not in mol_block or ("V2000" not in mol_block and "V3000" not in mol_block):
+            return {"ok": False, "error": "RDKit could not create a complete structure file. Try another molecule."}
+        sdf_text = mol_block.rstrip() + "\n$$$$\n"
+        return {"ok": True, "sdf": sdf_text, "dimension": "3D", "source": "RDKit local conformer generation"}
     except Exception as exc:
         return {"ok": False, "error": f"Local 3D generation failed ({type(exc).__name__}). Try another molecule."}
 
