@@ -3,6 +3,9 @@ import pandas as pd
 import re
 import math
 import requests
+import json
+import html as html_lib
+import streamlit.components.v1 as components
 from urllib.parse import quote
 from collections import Counter
 
@@ -82,6 +85,42 @@ def fetch_pubchem_compound(molecule_name):
         return {"ok": False, "error": f"PubChem could not be reached right now ({type(exc).__name__})."}
     except (ValueError, KeyError, TypeError):
         return {"ok": False, "error": "PubChem returned data in an unexpected format."}
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_pubchem_3d_sdf(cid):
+    """Fetch a PubChem 3D conformer as SDF for the interactive structure viewer."""
+    if not cid:
+        return {"ok": False, "error": "PubChem did not provide a compound ID for this molecule."}
+    url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{int(cid)}/SDF?record_type=3d"
+    try:
+        response = requests.get(
+            url, timeout=20,
+            headers={"User-Agent": "ChemistryExplorer/1.0 (educational Streamlit app)"}
+        )
+        response.raise_for_status()
+        sdf = response.text.strip()
+        if not sdf or "M END" not in sdf:
+            return {"ok": False, "error": "PubChem did not return a usable 3D structure for this compound."}
+        return {"ok": True, "sdf": sdf}
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        if status == 404:
+            message = "PubChem does not have a 3D conformer available for this molecule."
+        else:
+            message = f"PubChem's 3D structure service returned HTTP {status}."
+        return {"ok": False, "error": message}
+    except requests.RequestException as exc:
+        return {"ok": False, "error": f"Could not load the 3D structure right now ({type(exc).__name__})."}
+
+
+def render_3d_viewer(sdf, molecule_name):
+    """Render an interactive 3Dmol.js structure in a Streamlit component."""
+    safe_name = html_lib.escape(str(molecule_name))
+    # Escape closing-script sequences before placing API data inside JavaScript.
+    sdf_json = json.dumps(sdf).replace("</", "<\\/")
+    viewer_html = f'''<!doctype html> <html> <head> <meta charset="utf-8"> <meta name="viewport" content="width=device-width, initial-scale=1"> <script src="https://3dmol.org/build/3Dmol-min.js"></script> <style> *{{box-sizing:border-box}} body{{margin:0;background:#0b1415;color:#d8eee5;font-family:Arial,sans-serif}} #viewer{{width:100%;height:370px;border:1px solid #285346;border-radius:14px;overflow:hidden;background:#0b1415;touch-action:pan-y}} .toolbar{{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 0}} button{{background:#102a23;color:#b9f6d7;border:1px solid #2c6b55;border-radius:9px;padding:8px 12px;font-weight:700;font-size:13px;cursor:pointer}} button.active{{background:#10b981;color:#06120e;border-color:#10b981}} .note{{font-size:12px;color:#91aaa1;margin:8px 2px 0;line-height:1.45}} #error{{color:#fca5a5;padding:16px}} </style> </head> <body> <div id="viewer" aria-label="Interactive 3D molecular structure"></div> <div class="toolbar"> <button id="stick" class="active" type="button">Ball &amp; stick</button> <button id="sphere" type="button">Space-filling</button> <button id="reset" type="button">Reset view</button> </div> <div class="note">{safe_name} · Drag to rotate, pinch or scroll to zoom. Use the buttons to change the molecular display.</div> <script> (function(){{ const sdf = {sdf_json}; const el = document.getElementById('viewer'); if (!window.$3Dmol) {{ el.innerHTML='<div id="error">The 3D viewer library could not load. Check your internet connection and reload this page.</div>'; return; }} const viewer = $3Dmol.createViewer(el, {{backgroundColor:'#0b1415', antialias:true}}); viewer.addModel(sdf, 'sdf'); function setBallStick() {{ viewer.setStyle({{}}, {{stick:{{radius:0.18}}, sphere:{{scale:0.25}}}}); viewer.zoomTo(); viewer.render(); document.getElementById('stick').classList.add('active'); document.getElementById('sphere').classList.remove('active'); }} function setSpaceFill() {{ viewer.setStyle({{}}, {{sphere:{{scale:0.8}}}}); viewer.zoomTo(); viewer.render(); document.getElementById('sphere').classList.add('active'); document.getElementById('stick').classList.remove('active'); }} document.getElementById('stick').addEventListener('click', setBallStick); document.getElementById('sphere').addEventListener('click', setSpaceFill); document.getElementById('reset').addEventListener('click', function() {{ viewer.zoomTo(); viewer.render(); }}); setBallStick(); window.addEventListener('resize', function() {{ viewer.resize(); viewer.render(); }}); }})(); </script> </body> </html>'''
+    components.html(viewer_html, height=435, scrolling=False)
+
 
 def parse_formula(formula):
     formula=formula.strip().replace(' ','')
@@ -190,6 +229,15 @@ elif page=='Molecule Explorer':
             if pubchem.get('molecular_weight'):
                 st.caption('PubChem molecular weight: ' + str(pubchem['molecular_weight']) + ' g/mol')
             st.markdown(f"[Open this record on PubChem]({pubchem.get('source_url')})")
+            st.markdown('### Interactive 3D structure')
+            with st.spinner('Loading the 3D molecular structure from PubChem…'):
+                structure_3d = fetch_pubchem_3d_sdf(pubchem.get('cid'))
+            if structure_3d.get('ok'):
+                render_3d_viewer(structure_3d['sdf'], name)
+                st.caption('3D coordinates are supplied by PubChem. The displayed conformer is a model and may not represent every real-world molecular conformation.')
+            else:
+                st.info(structure_3d.get('error', 'A 3D conformer is not available for this molecule.'))
+                st.caption('The remaining molecule information and calculators are still available.')
         else:
             live_smiles = None
             st.warning(pubchem.get('error', 'PubChem lookup failed.'))
