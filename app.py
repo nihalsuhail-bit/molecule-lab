@@ -88,29 +88,70 @@ def fetch_pubchem_compound(molecule_name):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_pubchem_3d_sdf(cid):
-    """Fetch a PubChem 3D conformer as SDF for the interactive structure viewer."""
+    """Fetch a 3D SDF from PubChem, trying its record and conformer endpoints."""
     if not cid:
         return {"ok": False, "error": "PubChem did not provide a compound ID for this molecule."}
-    url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{int(cid)}/SDF?record_type=3d"
+
+    headers = {"User-Agent": "ChemistryExplorer/1.1 (educational Streamlit app)"}
+    cid = int(cid)
+    urls = [
+        f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/record/SDF?record_type=3d",
+        f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/SDF?record_type=3d",
+    ]
+
+    def usable_sdf(text):
+        # A real SDF record has an atom/bond block and an M END terminator.
+        if not text or "M END" not in text:
+            return False
+        lines = text.splitlines()
+        if len(lines) < 5:
+            return False
+        # Avoid treating PubChem's plain-text error message as a structure.
+        return any("V2000" in line or "V3000" in line for line in lines[:8])
+
     try:
-        response = requests.get(
-            url, timeout=20,
-            headers={"User-Agent": "ChemistryExplorer/1.0 (educational Streamlit app)"}
-        )
-        response.raise_for_status()
-        sdf = response.text.strip()
-        if not sdf or "M END" not in sdf:
-            return {"ok": False, "error": "PubChem did not return a usable 3D structure for this compound."}
-        return {"ok": True, "sdf": sdf}
-    except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        if status == 404:
-            message = "PubChem does not have a 3D conformer available for this molecule."
+        last_status = None
+        for url in urls:
+            try:
+                response = requests.get(url, timeout=20, headers=headers)
+                last_status = response.status_code
+                if response.ok and usable_sdf(response.text):
+                    return {"ok": True, "sdf": response.text.strip(), "dimension": "3D"}
+            except requests.RequestException:
+                continue
+
+        # As a secondary route, ask PubChem for conformer IDs, then retrieve
+        # the first conformer's SDF directly.
+        conformer_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/conformers/TXT"
+        try:
+            conf_response = requests.get(conformer_url, timeout=15, headers=headers)
+            if conf_response.ok:
+                conformer_ids = [line.strip() for line in conf_response.text.splitlines() if line.strip()]
+                if conformer_ids:
+                    sdf_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/conformers/{quote(conformer_ids[0], safe='')}/SDF"
+                    sdf_response = requests.get(sdf_url, timeout=20, headers=headers)
+                    if sdf_response.ok and usable_sdf(sdf_response.text):
+                        return {"ok": True, "sdf": sdf_response.text.strip(), "dimension": "3D"}
+        except requests.RequestException:
+            pass
+
+        # Last-resort fallback: retrieve the available 2D SDF so the viewer
+        # still displays the molecule instead of leaving the panel empty.
+        two_d_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/record/SDF"
+        try:
+            two_d_response = requests.get(two_d_url, timeout=20, headers=headers)
+            if two_d_response.ok and usable_sdf(two_d_response.text):
+                return {"ok": True, "sdf": two_d_response.text.strip(), "dimension": "2D"}
+        except requests.RequestException:
+            pass
+
+        if last_status == 404:
+            message = "PubChem has no usable 3D conformer for this molecule, and its fallback structure could not be loaded."
         else:
-            message = f"PubChem's 3D structure service returned HTTP {status}."
+            message = "PubChem did not return a valid structure. Try Refresh PubChem data or select another molecule."
         return {"ok": False, "error": message}
-    except requests.RequestException as exc:
-        return {"ok": False, "error": f"Could not load the 3D structure right now ({type(exc).__name__})."}
+    except (ValueError, TypeError) as exc:
+        return {"ok": False, "error": f"Could not process the PubChem compound ID ({type(exc).__name__})."}
 
 
 def render_3d_viewer(sdf, molecule_name):
@@ -234,7 +275,7 @@ elif page=='Molecule Explorer':
                 structure_3d = fetch_pubchem_3d_sdf(pubchem.get('cid'))
             if structure_3d.get('ok'):
                 render_3d_viewer(structure_3d['sdf'], name)
-                st.caption('3D coordinates are supplied by PubChem. The displayed conformer is a model and may not represent every real-world molecular conformation.')
+                st.caption(('3D coordinates are supplied by PubChem. ' if structure_3d.get('dimension') == '3D' else 'PubChem 3D coordinates were unavailable, so this is a 2D fallback structure. ') + 'The displayed structure is a model and may not represent every real-world molecular conformation.')
             else:
                 st.info(structure_3d.get('error', 'A 3D conformer is not available for this molecule.'))
                 st.caption('The remaining molecule information and calculators are still available.')
