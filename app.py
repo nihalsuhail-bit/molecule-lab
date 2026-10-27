@@ -87,72 +87,44 @@ def fetch_pubchem_compound(molecule_name):
         return {"ok": False, "error": "PubChem returned data in an unexpected format."}
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def fetch_pubchem_3d_sdf(cid):
-    """Fetch a 3D SDF from PubChem, trying its record and conformer endpoints."""
-    if not cid:
-        return {"ok": False, "error": "PubChem did not provide a compound ID for this molecule."}
-
-    headers = {"User-Agent": "ChemistryExplorer/1.1 (educational Streamlit app)"}
-    cid = int(cid)
-    urls = [
-        f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/record/SDF?record_type=3d",
-        f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/SDF?record_type=3d",
-    ]
-
-    def usable_sdf(text):
-        # A real SDF record has an atom/bond block and an M END terminator.
-        if not text or "M END" not in text:
-            return False
-        lines = text.splitlines()
-        if len(lines) < 5:
-            return False
-        # Avoid treating PubChem's plain-text error message as a structure.
-        return any("V2000" in line or "V3000" in line for line in lines[:8])
+def generate_local_3d_sdf(smiles):
+    """Generate 3D coordinates locally from SMILES using RDKit (no PubChem 3D API)."""
+    if not smiles:
+        return {"ok": False, "error": "No SMILES string is available to build this molecule."}
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+    except ImportError:
+        return {"ok": False, "error": "The 3D chemistry engine is not installed yet. Add 'rdkit' to requirements.txt and wait for Streamlit to redeploy."}
 
     try:
-        last_status = None
-        for url in urls:
-            try:
-                response = requests.get(url, timeout=20, headers=headers)
-                last_status = response.status_code
-                if response.ok and usable_sdf(response.text):
-                    return {"ok": True, "sdf": response.text.strip(), "dimension": "3D"}
-            except requests.RequestException:
-                continue
+        mol = Chem.MolFromSmiles(str(smiles))
+        if mol is None:
+            return {"ok": False, "error": "RDKit could not interpret the selected SMILES string."}
+        mol = Chem.AddHs(mol)
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 2026
+        params.maxIterations = 1000
+        embedded = AllChem.EmbedMolecule(mol, params)
+        if embedded != 0:
+            # Try a second deterministic embedding attempt for difficult structures.
+            params.randomSeed = 42
+            embedded = AllChem.EmbedMolecule(mol, params)
+        if embedded != 0:
+            return {"ok": False, "error": "RDKit could not generate 3D coordinates for this molecule. Try another molecule."}
 
-        # As a secondary route, ask PubChem for conformer IDs, then retrieve
-        # the first conformer's SDF directly.
-        conformer_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/conformers/TXT"
-        try:
-            conf_response = requests.get(conformer_url, timeout=15, headers=headers)
-            if conf_response.ok:
-                conformer_ids = [line.strip() for line in conf_response.text.splitlines() if line.strip()]
-                if conformer_ids:
-                    sdf_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/conformers/{quote(conformer_ids[0], safe='')}/SDF"
-                    sdf_response = requests.get(sdf_url, timeout=20, headers=headers)
-                    if sdf_response.ok and usable_sdf(sdf_response.text):
-                        return {"ok": True, "sdf": sdf_response.text.strip(), "dimension": "3D"}
-        except requests.RequestException:
-            pass
+        # Optimise coordinates using a molecular mechanics force field when available.
+        if AllChem.MMFFHasAllMoleculeParams(mol):
+            AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
+        elif AllChem.UFFHasAllMoleculeParams(mol):
+            AllChem.UFFOptimizeMolecule(mol, maxIters=500)
 
-        # Last-resort fallback: retrieve the available 2D SDF so the viewer
-        # still displays the molecule instead of leaving the panel empty.
-        two_d_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/record/SDF"
-        try:
-            two_d_response = requests.get(two_d_url, timeout=20, headers=headers)
-            if two_d_response.ok and usable_sdf(two_d_response.text):
-                return {"ok": True, "sdf": two_d_response.text.strip(), "dimension": "2D"}
-        except requests.RequestException:
-            pass
-
-        if last_status == 404:
-            message = "PubChem has no usable 3D conformer for this molecule, and its fallback structure could not be loaded."
-        else:
-            message = "PubChem did not return a valid structure. Try Refresh PubChem data or select another molecule."
-        return {"ok": False, "error": message}
-    except (ValueError, TypeError) as exc:
-        return {"ok": False, "error": f"Could not process the PubChem compound ID ({type(exc).__name__})."}
-
+        mol_block = Chem.MolToMolBlock(mol, confId=0)
+        if not mol_block or "M END" not in mol_block:
+            return {"ok": False, "error": "RDKit generated coordinates, but the structure file was incomplete."}
+        return {"ok": True, "sdf": mol_block + "\n$$$$\n", "dimension": "3D", "source": "RDKit local conformer generation"}
+    except Exception as exc:
+        return {"ok": False, "error": f"Local 3D generation failed ({type(exc).__name__}). Try another molecule."}
 
 def render_3d_viewer(sdf, molecule_name):
     """Render an interactive 3Dmol.js structure in a Streamlit component."""
@@ -249,48 +221,48 @@ elif page=='Molecule Explorer':
         x,y,z=st.columns(3); x.metric('Chemical formula',formula); y.metric('Molar mass',f'{mass:.3f} g/mol'); z.metric('Total atoms',sum(counts.values()))
         st.markdown('### About this molecule'); st.write(desc); st.markdown('**Applications / context:** '+uses)
         st.markdown('### SMILES notation')
-        st.write('Live lookup: PubChem PUG REST API')
-        refresh_pubchem = st.button('Refresh PubChem data', key='refresh_pubchem')
+        st.caption('Molecular 3D coordinates are generated locally with RDKit; the 3D viewer does not depend on PubChem conformer downloads.')
+        refresh_pubchem = st.button('Refresh compound information', key='refresh_pubchem')
         if refresh_pubchem:
             fetch_pubchem_compound.clear()
-        with st.spinner('Looking up this molecule in PubChem…'):
+            generate_local_3d_sdf.clear()
+        with st.spinner('Checking compound reference information…'):
             pubchem = fetch_pubchem_compound(name)
+
+        live_smiles = None
         if pubchem.get('ok'):
             live_smiles = pubchem.get('smiles') or pubchem.get('connectivity_smiles')
             if live_smiles:
-                st.success(f"Live data retrieved from PubChem · CID {pubchem.get('cid')}")
+                st.success(f"Compound information retrieved · PubChem CID {pubchem.get('cid')}")
                 st.code(live_smiles, language=None)
             else:
-                st.warning('PubChem matched the compound but did not return a SMILES field. Showing the built-in reference string below if available.')
-                live_smiles = None
+                st.warning('The compound lookup returned no SMILES string; the built-in reference will be used for the 3D model.')
             if pubchem.get('iupac_name'):
                 st.caption('IUPAC name: ' + str(pubchem['iupac_name']))
             if pubchem.get('formula'):
-                st.caption('PubChem formula: ' + str(pubchem['formula']))
+                st.caption('Reference formula: ' + str(pubchem['formula']))
             if pubchem.get('molecular_weight'):
-                st.caption('PubChem molecular weight: ' + str(pubchem['molecular_weight']) + ' g/mol')
-            st.markdown(f"[Open this record on PubChem]({pubchem.get('source_url')})")
-            st.markdown('### Interactive 3D structure')
-            with st.spinner('Loading the 3D molecular structure from PubChem…'):
-                structure_3d = fetch_pubchem_3d_sdf(pubchem.get('cid'))
+                st.caption('Reference molecular weight: ' + str(pubchem['molecular_weight']) + ' g/mol')
+            st.markdown(f"[Open compound reference on PubChem]({pubchem.get('source_url')})")
+        else:
+            st.warning(pubchem.get('error', 'Live compound lookup is unavailable. Using the built-in molecule library where possible.'))
+
+        smiles_for_model = live_smiles or SMILES.get(name)
+        if not live_smiles and smiles_for_model:
+            st.markdown('**Built-in SMILES used for the model**')
+            st.code(smiles_for_model, language=None)
+        st.markdown('### Interactive 3D structure')
+        if smiles_for_model:
+            with st.spinner('Generating a 3D conformer locally with RDKit…'):
+                structure_3d = generate_local_3d_sdf(smiles_for_model)
             if structure_3d.get('ok'):
                 render_3d_viewer(structure_3d['sdf'], name)
-                st.caption(('3D coordinates are supplied by PubChem. ' if structure_3d.get('dimension') == '3D' else 'PubChem 3D coordinates were unavailable, so this is a 2D fallback structure. ') + 'The displayed structure is a model and may not represent every real-world molecular conformation.')
+                st.caption('3D coordinates were computationally generated by RDKit from the SMILES structure. This is one plausible modelled conformer, not a claim that the molecule has only one shape.')
             else:
-                st.info(structure_3d.get('error', 'A 3D conformer is not available for this molecule.'))
-                st.caption('The remaining molecule information and calculators are still available.')
+                st.info(structure_3d.get('error', 'A 3D model could not be generated for this molecule.'))
         else:
-            live_smiles = None
-            st.warning(pubchem.get('error', 'PubChem lookup failed.'))
-        if not pubchem.get('ok') or not (pubchem.get('smiles') or pubchem.get('connectivity_smiles')):
-            fallback_smiles = SMILES.get(name)
-            if fallback_smiles:
-                st.markdown('**Built-in fallback SMILES**')
-                st.code(fallback_smiles, language=None)
-                st.caption('This is the local reference value in the app, not a live PubChem result.')
-            else:
-                st.info('No SMILES value is available from PubChem or the built-in reference for this molecule.')
-        st.caption('SMILES (Simplified Molecular Input Line Entry System) encodes a molecular structure as text. PubChem results are cached for up to 24 hours; use Refresh PubChem data to request a fresh lookup.')
+            st.info('No SMILES string is available to generate a 3D model for this molecule.')
+        st.caption('SMILES (Simplified Molecular Input Line Entry System) encodes a molecular structure as text. Compound details may be retrieved from PubChem, but 3D coordinates are generated locally by RDKit.')
         st.markdown('### Element composition')
         comp=[]
         for s,n in counts.items(): comp.append({'Element':E_BY_SYMBOL[s]['Element'],'Symbol':s,'Number of atoms':n,'Atomic mass (u)':MASS[s],'Mass contribution (g/mol)':round(MASS[s]*n,4)})
